@@ -3,23 +3,17 @@ import express, { type RequestHandler } from "express";
 import { IncomingMessage, ServerResponse } from "node:http";
 import * as pinoHttpModule from "pino-http";
 import { z } from "zod";
-import { context, trace } from "@opentelemetry/api";
 import { logger } from "./lib/logger.js";
-import { dlqQueue, jobsQueue } from "./lib/queue.js";
+import { jobsQueue } from "./lib/queue.js";
 import {
-  addJobEvent,
   createJobIdempotent,
   getJobByIdForTenant,
-  getLastJobTraceCarrier,
   getJobStatsForTenant,
   listJobsForTenant,
   markCancelled,
   markEnqueueFailed,
-  markEnqueued,
-  requestCancel,
-  resetForManualRetry
+  requestCancel
 } from "./lib/jobRepo.js";
-import { getJobTypeConfig } from "./lib/jobTypes.js";
 import { authenticateApiKey, checkMetricsToken, createApiKey, revokeApiKey } from "./lib/auth.js";
 import { rateLimit } from "./lib/rateLimit.js";
 import { env } from "./config.js";
@@ -27,8 +21,10 @@ import { metricsHandler, metricsMiddleware } from "./lib/metrics.js";
 import { JobStatus } from "@prisma/client";
 import { hasScope } from "./lib/scopes.js";
 import { prisma } from "./lib/prisma.js";
-import { checkAndIncRequests, checkJobsEnqueuedLimit, ensureTenantExists, incJobsEnqueued } from "./lib/usage.js";
-import { extractContextFromCarrier, injectTraceCarrier } from "./lib/tracePropagation.js";
+import { checkAndIncRequests, checkJobsEnqueuedLimit, ensureTenantExists } from "./lib/usage.js";
+import { enqueueJob } from "./services/jobService.js";
+import { ServiceError } from "./services/serviceError.js";
+import { manualRetryJob, replayDlqJob } from "./services/retryService.js";
 
 const pinoHttp =
   (pinoHttpModule as unknown as { default?: typeof pinoHttpModule }).default ?? (pinoHttpModule as unknown as any);
@@ -159,45 +155,16 @@ export function createApp() {
       });
     }
 
-    const cfg = getJobTypeConfig(job.type);
-
     try {
       const requestId = (req as unknown as { id?: string }).id;
-      const tracer = trace.getTracer("ajpp");
-      const span = tracer.startSpan("job.enqueue", {
-        attributes: {
-          "ajpp.job_id": job.id,
-          "ajpp.job_type": job.type,
-          "ajpp.tenant_id": req.tenantId!
-        }
+      await enqueueJob({
+        tenantId: req.tenantId!,
+        job: { id: job.id, type: job.type, payloadHash: job.payloadHash, maxAttempts: job.maxAttempts },
+        requestId,
+        priority: parsed.data.priority,
+        delayMs: parsed.data.delayMs
       });
-      try {
-        const traceCarrier = await context.with(trace.setSpan(context.active(), span), async () => injectTraceCarrier());
-        await jobsQueue.add(
-          "job",
-          { jobId: job.id, requestId, traceCarrier },
-          {
-            jobId: job.id,
-            attempts: cfg.maxAttempts,
-            backoff: { type: "exponential", delay: cfg.backoffBaseMs, jitter: 0.2 },
-            deduplication: { id: `${req.tenantId!}:${job.payloadHash}`, ttl: env.JOB_DEDUP_TTL_MS, keepLastIfActive: true },
-            priority: parsed.data.priority,
-            delay: parsed.data.delayMs,
-            removeOnComplete: true,
-            removeOnFail: true
-          }
-        );
-        await markEnqueued(job.id, { traceCarrier });
-        await incJobsEnqueued(req.tenantId!);
-        span.setStatus({ code: 1 });
-        return res.status(201).json({ id: job.id });
-      } catch (err) {
-        span.recordException(err as Error);
-        span.setStatus({ code: 2, message: (err as Error)?.message });
-        throw err;
-      } finally {
-        span.end();
-      }
+      return res.status(201).json({ id: job.id });
     } catch (err) {
       const msg = err instanceof Error ? err.message : "enqueue_failed";
       await markEnqueueFailed(job.id, msg);
@@ -283,129 +250,26 @@ export function createApp() {
   app.post("/jobs/:id/retry", async (req, res) => {
     if (!hasScope(req.apiKeyScopes, "jobs:admin")) return res.status(403).json({ error: "forbidden" });
     const jobId = req.params.id;
-    const job = await getJobByIdForTenant(req.tenantId!, jobId);
-    if (!job) return res.status(404).json({ error: "not_found" });
-
-    const existing = await jobsQueue.getJob(jobId);
-    if (existing) {
-      try {
-        await existing.remove();
-      } catch {}
-    }
-
-    const existingDlq = await dlqQueue.getJob(jobId);
-    if (existingDlq) {
-      try {
-        await existingDlq.remove();
-      } catch {}
-    }
-
-    await resetForManualRetry(jobId);
-    const cfg = getJobTypeConfig(job.type);
     const requestId = (req as unknown as { id?: string }).id;
-    const existingCarrier = await getLastJobTraceCarrier(jobId);
-    const parentCtx = extractContextFromCarrier(existingCarrier);
-    const tracer = trace.getTracer("ajpp");
-    const span = tracer.startSpan(
-      "job.retry_manual",
-      {
-        attributes: {
-          "ajpp.job_id": jobId,
-          "ajpp.job_type": job.type,
-          "ajpp.tenant_id": req.tenantId!
-        }
-      },
-      parentCtx
-    );
     try {
-      const traceCarrier = await context.with(trace.setSpan(parentCtx, span), async () => existingCarrier ?? injectTraceCarrier());
-      await jobsQueue.add(
-        "job",
-        { jobId, requestId, traceCarrier },
-        {
-          jobId,
-          attempts: cfg.maxAttempts,
-          backoff: { type: "exponential", delay: cfg.backoffBaseMs, jitter: 0.2 },
-          deduplication: { id: `${req.tenantId!}:${job.payloadHash}`, ttl: env.JOB_DEDUP_TTL_MS, keepLastIfActive: true },
-          removeOnComplete: true,
-          removeOnFail: true
-        }
-      );
-
-      await markEnqueued(jobId, { traceCarrier });
-      span.setStatus({ code: 1 });
+      await manualRetryJob({ tenantId: req.tenantId!, jobId, requestId });
       return res.json({ id: jobId, status: "queued" });
     } catch (err) {
-      span.recordException(err as Error);
-      span.setStatus({ code: 2, message: (err as Error)?.message });
+      if (err instanceof ServiceError) return res.status(err.statusCode).json({ error: err.code });
       throw err;
-    } finally {
-      span.end();
     }
   });
 
   app.post("/dlq/:id/replay", async (req, res) => {
     if (!hasScope(req.apiKeyScopes, "jobs:admin")) return res.status(403).json({ error: "forbidden" });
     const jobId = req.params.id;
-    const job = await getJobByIdForTenant(req.tenantId!, jobId);
-    if (!job) return res.status(404).json({ error: "not_found" });
-    if (job.status !== JobStatus.dlq) return res.status(409).json({ error: "not_dlq" });
-
-    const existingDlq = await dlqQueue.getJob(jobId);
-    if (existingDlq) {
-      try {
-        await existingDlq.remove();
-      } catch {}
-    }
-
-    const existing = await jobsQueue.getJob(jobId);
-    if (existing) {
-      try {
-        await existing.remove();
-      } catch {}
-    }
-
-    await resetForManualRetry(jobId);
-    const cfg = getJobTypeConfig(job.type);
     const requestId = (req as unknown as { id?: string }).id;
-    const existingCarrier = await getLastJobTraceCarrier(jobId);
-    const parentCtx = extractContextFromCarrier(existingCarrier);
-    const tracer = trace.getTracer("ajpp");
-    const span = tracer.startSpan(
-      "job.dlq_replay",
-      {
-        attributes: {
-          "ajpp.job_id": jobId,
-          "ajpp.job_type": job.type,
-          "ajpp.tenant_id": req.tenantId!
-        }
-      },
-      parentCtx
-    );
     try {
-      const traceCarrier = await context.with(trace.setSpan(parentCtx, span), async () => existingCarrier ?? injectTraceCarrier());
-      await jobsQueue.add(
-        "job",
-        { jobId, requestId, traceCarrier },
-        {
-          jobId,
-          attempts: cfg.maxAttempts,
-          backoff: { type: "exponential", delay: cfg.backoffBaseMs, jitter: 0.2 },
-          deduplication: { id: `${req.tenantId!}:${job.payloadHash}`, ttl: env.JOB_DEDUP_TTL_MS, keepLastIfActive: true },
-          removeOnComplete: true,
-          removeOnFail: true
-        }
-      );
-
-      await addJobEvent(jobId, "job_dlq_replayed", { traceCarrier });
-      span.setStatus({ code: 1 });
+      await replayDlqJob({ tenantId: req.tenantId!, jobId, requestId });
       return res.json({ id: jobId, status: "queued" });
     } catch (err) {
-      span.recordException(err as Error);
-      span.setStatus({ code: 2, message: (err as Error)?.message });
+      if (err instanceof ServiceError) return res.status(err.statusCode).json({ error: err.code });
       throw err;
-    } finally {
-      span.end();
     }
   });
 
