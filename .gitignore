@@ -1,0 +1,8 @@
+node_modules
+dist
+.env
+.env.test
+coverage
+.DS_Store
+tests/*.js
+

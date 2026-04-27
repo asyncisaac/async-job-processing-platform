@@ -1,0 +1,114 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum JobStatus {
+  created
+  queued
+  started
+  retrying
+  succeeded
+  failed
+  dlq
+  enqueue_failed
+  cancel_requested
+  cancelled
+}
+
+enum TenantPlan {
+  free
+  pro
+}
+
+model Job {
+  id             String    @id @default(uuid())
+  tenantId       String
+  type           String
+  status         JobStatus
+  attempts       Int       @default(0)
+  maxAttempts    Int
+  payload        Json
+  payloadHash    String
+  idempotencyKey String
+  lastError      String?   @db.Text
+  cancelRequested Boolean  @default(false)
+  startedAt      DateTime?
+  finishedAt     DateTime?
+  durationMs     Int?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  events          JobEvent[]
+  effect          JobEffect?
+  tenant          Tenant    @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+
+  @@unique([tenantId, idempotencyKey])
+  @@index([tenantId, status, createdAt(sort: Desc)])
+}
+
+model JobEvent {
+  id    String   @id @default(uuid())
+  jobId String
+  type  String
+  ts    DateTime @default(now())
+  data  Json?
+
+  job   Job      @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([jobId, ts])
+}
+
+model JobEffect {
+  jobId      String   @id
+  executedAt DateTime @default(now())
+
+  job Job @relation(fields: [jobId], references: [id], onDelete: Cascade)
+}
+
+model Tenant {
+  id        String      @id
+  plan      TenantPlan  @default(free)
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+
+  jobs      Job[]
+  apiKeys   ApiKey[]
+  usageDays TenantUsageDaily[]
+}
+
+model ApiKey {
+  id        String    @id @default(uuid())
+  tenantId  String
+  name      String
+  keyPrefix String
+  secretSalt String
+  secretHash String
+  scopes    String[]
+  revokedAt DateTime?
+  lastUsedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, revokedAt])
+  @@unique([keyPrefix])
+}
+
+model TenantUsageDaily {
+  tenantId      String
+  day           DateTime
+  requestsCount Int     @default(0)
+  jobsEnqueued  Int     @default(0)
+  jobsSucceeded Int     @default(0)
+  jobsDlq       Int     @default(0)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@id([tenantId, day])
+}
+

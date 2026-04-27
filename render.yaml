@@ -1,0 +1,59 @@
+services:
+  - type: web
+    name: ajpp-api
+    env: node
+    plan: free
+    buildCommand: npm ci && npm run build:full
+    startCommand: npm run deploy:api
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: LOG_LEVEL
+        value: info
+      - key: QUEUE_NAME
+        value: jobs
+      - key: DLQ_NAME
+        value: jobs_dlq
+      - key: BACKOFF_BASE_MS
+        value: "50"
+      - key: RATE_LIMIT_WINDOW_SEC
+        value: "60"
+      - key: RATE_LIMIT_MAX_PER_IP
+        value: "120"
+      - key: RATE_LIMIT_MAX_PER_KEY
+        value: "600"
+      - key: DEFAULT_TENANT_ID
+        value: tenant_demo
+      - key: DATABASE_URL
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: METRICS_TOKEN
+        sync: false
+  - type: worker
+    name: ajpp-worker
+    env: node
+    plan: free
+    buildCommand: npm ci && npm run build:full
+    startCommand: npm run deploy:worker
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: LOG_LEVEL
+        value: info
+      - key: QUEUE_NAME
+        value: jobs
+      - key: DLQ_NAME
+        value: jobs_dlq
+      - key: BACKOFF_BASE_MS
+        value: "50"
+      - key: DEFAULT_TENANT_ID
+        value: tenant_demo
+      - key: DATABASE_URL
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: METRICS_TOKEN
+        sync: false
+
