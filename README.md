@@ -12,18 +12,13 @@
 [![Prometheus](https://img.shields.io/badge/Prometheus-E6522C?style=for-the-badge&logo=prometheus&logoColor=white)](https://prometheus.io/)
 [![Docker](https://img.shields.io/badge/Docker-2CA5E0?style=for-the-badge&logo=docker&logoColor=white)](https://www.docker.com/)
 
-**[🚀 Live Demo](https://your-demo-url.com)** · **[📘 API Docs](https://your-demo-url.com/docs)** · **[⭐ Architecture](#-architecture)** · **[🛠️ Run Locally](#-running-locally)**
+**[📘 API Quick Reference](#-api-quick-reference)** · **[⭐ Architecture](#-architecture)** · **[🛠️ Run Locally](#-running-locally)**
 
 </div>
 
 ---
 
-> ⚠️ **Screenshots coming soon.** Replace this section with actual screenshots/GIFs of the dashboard showing: job list UI, DLQ replay, metrics dashboard, and a successful demo flow (enqueue → retry → DLQ → replay).
->
-> ```
-> ![Jobs Dashboard](https://your-image-host.com/jobs-dashboard.png)
-> ![DLQ & Replay](https://your-image-host.com/dlq-replay.png)
-> ```
+> **Screenshots:** Not published yet.
 
 ---
 
@@ -130,18 +125,9 @@ flowchart LR
 
 ---
 
-## 🚀 Live Demo
+## 🚀 Hosted Demo
 
-> ⚠️ **Deploy first, then fill this in.**
->
-> | Resource | URL |
-> |----------|-----|
-> | API Base | `https://your-api-domain.com` |
-> | Jobs UI | `https://your-api-domain.com/ui/jobs` |
-> | Metrics | `https://your-api-domain.com/metrics` (token protected) |
-> | Demo API Key | `ak_demo_xxxxxxxxxxxxxxxx` (jobs:read, jobs:write) — scoped to a demo tenant with daily limits |
->
-> Try the [demo curl flow](#demo-flow) below against the live API.
+A hosted demo, public API URL, and demo API key are not published. To try the platform, follow the [local setup](#-running-locally) and create a local API key there, then follow the Full Demo Flow below.
 
 ---
 
